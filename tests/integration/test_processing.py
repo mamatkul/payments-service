@@ -1,4 +1,6 @@
+import asyncio
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -61,6 +63,26 @@ async def test_charges_stores_status_and_sends_webhook(
     assert payment.webhook_delivered_at is not None
     assert payment.webhook_attempts == 1
     assert webhooks.delivered == [(payment_id, outcome.value)]
+
+
+class SlowGateway(FakeGateway):
+    async def charge(self) -> PaymentStatus:
+        self.started_at = datetime.now(UTC)
+        await asyncio.sleep(0.3)
+        return await super().charge()
+
+
+async def test_processed_at_is_set_after_gateway_responds(
+    session_factory: async_sessionmaker[AsyncSession], clean_db: None
+) -> None:
+    payment_id = await make(session_factory)
+    gateway = SlowGateway()
+
+    await PaymentProcessor(session_factory, gateway, FakeWebhooks()).process(payment_id)
+
+    payment = await load(session_factory, payment_id)
+    assert payment.processed_at is not None
+    assert (payment.processed_at - gateway.started_at).total_seconds() >= 0.25
 
 
 async def test_webhook_failure_keeps_status_and_retry_does_not_charge_again(

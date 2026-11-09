@@ -45,6 +45,7 @@ class PaymentProcessor:
                 await self._notify(session, payment)
 
     async def _charge(self, session: AsyncSession, payment: Payment) -> None:
+        await session.commit()
         outcome = await self._gateway.charge()
         result = await session.execute(
             update(Payment)
