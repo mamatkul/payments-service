@@ -4,6 +4,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 import pytest
 from faststream import AckPolicy
 from faststream.rabbit import RabbitBroker, RabbitMessage
@@ -19,7 +20,12 @@ from payments.messaging.topology import (
     declare_topology,
 )
 
-RABBITMQ_URL = os.environ.get("TEST_RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+RABBITMQ_URL = os.environ.get(
+    "TEST_RABBITMQ_URL", "amqp://guest:guest@localhost:5672/payments_test"
+)
+RABBITMQ_MANAGEMENT_URL = os.environ.get(
+    "TEST_RABBITMQ_MANAGEMENT_URL", "http://guest:guest@localhost:15672"
+)
 
 
 class FailingProcessor:
@@ -37,8 +43,32 @@ async def purge(broker: RabbitBroker) -> None:
         await declared.purge()
 
 
+async def ensure_vhost(amqp_url: str, management_url: str) -> None:
+    amqp = httpx.URL(amqp_url)
+    vhost = amqp.path.lstrip("/") or "/"
+    if vhost == "/":
+        return
+    management = httpx.URL(management_url)
+    async with httpx.AsyncClient(
+        base_url=management.copy_with(username=None, password=None),
+        auth=(management.username, management.password),
+        timeout=3,
+    ) as client:
+        response = await client.put(f"/api/vhosts/{vhost}")
+        response.raise_for_status()
+        response = await client.put(
+            f"/api/permissions/{vhost}/{amqp.username}",
+            json={"configure": ".*", "write": ".*", "read": ".*"},
+        )
+        response.raise_for_status()
+
+
 @pytest.fixture
 async def broker() -> AsyncIterator[RabbitBroker]:
+    try:
+        await ensure_vhost(RABBITMQ_URL, RABBITMQ_MANAGEMENT_URL)
+    except httpx.HTTPError:
+        pytest.skip("RabbitMQ management API is not available")
     broker = RabbitBroker(RABBITMQ_URL)
     try:
         await asyncio.wait_for(broker.connect(), timeout=3)

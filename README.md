@@ -148,9 +148,9 @@ make lint typecheck                # ruff и mypy --strict
 
 - `tests/unit`: логика без внешних зависимостей. Consumer проверяется на in-memory брокере FastStream: ack, retry с номером попытки, DLQ.
 - `tests/integration`: нужен PostgreSQL. Схема создаётся настоящими миграциями. Проверяются API, идемпотентность (включая гонку параллельных запросов), outbox relay (порядок, сбой публикации, конкурентные relay) и обработка платежа.
-- `tests/rabbitmq`: нужен RabbitMQ. Сквозной путь сообщения через реальные retry-очереди с TTL до DLQ. Если брокер недоступен, тест пропускается.
+- `tests/rabbitmq`: нужен RabbitMQ с management API. Сквозной путь сообщения через реальные retry-очереди с TTL до DLQ. Тест работает в отдельном vhost `payments_test` (создаётся автоматически), поэтому не конфликтует с запущенным стеком и не трогает его очереди. Если брокер недоступен, тест пропускается.
 
-Адреса для тестов задаются через `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL` (по умолчанию localhost из `docker compose`).
+Адреса для тестов задаются через `TEST_DATABASE_URL`, `TEST_RABBITMQ_URL` и `TEST_RABBITMQ_MANAGEMENT_URL` (по умолчанию localhost из `docker compose`).
 
 Запуск без Docker (PostgreSQL и RabbitMQ должны быть запущены):
 
