@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     outbox_poll_interval_seconds: float = Field(default=0.5, gt=0)
+    outbox_max_backoff_seconds: float = Field(default=30.0, gt=0)
     outbox_batch_size: int = Field(default=100, ge=1, le=1000)
 
     max_attempts: int = Field(default=3, ge=1, le=10)

@@ -2,6 +2,8 @@ import asyncio
 import contextlib
 import logging
 import signal
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -40,13 +42,35 @@ class RabbitEventPublisher:
         )
 
 
+@dataclass(frozen=True)
+class RelayResult:
+    published: int
+    failed: bool
+
+
+class Backoff:
+    def __init__(self, initial: float, maximum: float) -> None:
+        self._initial = initial
+        self._maximum = maximum
+        self._current = initial
+
+    def next(self) -> float:
+        delay = self._current
+        self._current = min(self._current * 2, self._maximum)
+        return delay
+
+    def reset(self) -> None:
+        self._current = self._initial
+
+
 async def relay_batch(
     session_factory: async_sessionmaker[AsyncSession],
     publisher: EventPublisher,
     *,
     batch_size: int,
-) -> int:
+) -> RelayResult:
     published = 0
+    failed = False
     async with session_factory() as session, session.begin():
         rows = (
             await session.scalars(
@@ -66,13 +90,41 @@ async def relay_batch(
             except Exception as error:
                 row.last_error = f"{type(error).__name__}: {error}"[:500]
                 logger.warning("outbox_publish_failed outbox_id=%s error=%s", row.id, error)
+                failed = True
                 break
             row.published_at = datetime.now(UTC)
             row.last_error = None
             published += 1
     if published:
         logger.info("outbox_published count=%s", published)
-    return published
+    return RelayResult(published=published, failed=failed)
+
+
+async def relay_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+    publisher: EventPublisher,
+    stop: asyncio.Event,
+    *,
+    batch_size: int,
+    poll_interval: float,
+    max_backoff: float,
+    wait: Callable[[float], Awaitable[None]],
+) -> None:
+    backoff = Backoff(poll_interval, max(poll_interval, max_backoff))
+    while not stop.is_set():
+        try:
+            result = await relay_batch(session_factory, publisher, batch_size=batch_size)
+        except Exception:
+            logger.exception("outbox_relay_iteration_failed")
+            result = RelayResult(published=0, failed=True)
+        if result.published:
+            backoff.reset()
+        if result.failed:
+            delay = backoff.next()
+            logger.info("outbox_relay_backoff delay=%s", delay)
+            await wait(delay)
+        elif result.published < batch_size:
+            await wait(poll_interval)
 
 
 async def run_relay(settings: Settings, stop: asyncio.Event) -> None:
@@ -84,19 +136,21 @@ async def run_relay(settings: Settings, stop: asyncio.Event) -> None:
         await declare_topology(
             broker, max_attempts=settings.max_attempts, base_delay=settings.retry_base_delay_seconds
         )
-        publisher = RabbitEventPublisher(broker)
         logger.info("outbox_relay_started")
-        while not stop.is_set():
-            try:
-                published = await relay_batch(
-                    session_factory, publisher, batch_size=settings.outbox_batch_size
-                )
-            except Exception:
-                logger.exception("outbox_relay_iteration_failed")
-                published = 0
-            if published < settings.outbox_batch_size:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), settings.outbox_poll_interval_seconds)
+
+        async def wait(delay: float) -> None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), delay)
+
+        await relay_loop(
+            session_factory,
+            RabbitEventPublisher(broker),
+            stop,
+            batch_size=settings.outbox_batch_size,
+            poll_interval=settings.outbox_poll_interval_seconds,
+            max_backoff=settings.outbox_max_backoff_seconds,
+            wait=wait,
+        )
     finally:
         await broker.stop()
         await engine.dispose()
