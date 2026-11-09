@@ -59,6 +59,7 @@ class PaymentProcessor:
         logger.info("payment_processed payment_id=%s status=%s", payment.id, payment.status)
 
     async def _notify(self, session: AsyncSession, payment: Payment) -> None:
+        await session.commit()
         try:
             await self._webhooks.send(payment)
         except WebhookDeliveryError as error:

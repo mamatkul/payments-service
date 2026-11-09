@@ -85,6 +85,26 @@ async def test_processed_at_is_set_after_gateway_responds(
     assert (payment.processed_at - gateway.started_at).total_seconds() >= 0.25
 
 
+class SlowWebhooks(FakeWebhooks):
+    async def send(self, payment: Payment) -> None:
+        self.started_at = datetime.now(UTC)
+        await asyncio.sleep(0.3)
+        await super().send(payment)
+
+
+async def test_webhook_delivered_at_is_set_after_webhook_responds(
+    session_factory: async_sessionmaker[AsyncSession], clean_db: None
+) -> None:
+    payment_id = await make(session_factory)
+    webhooks = SlowWebhooks()
+
+    await PaymentProcessor(session_factory, FakeGateway(), webhooks).process(payment_id)
+
+    payment = await load(session_factory, payment_id)
+    assert payment.webhook_delivered_at is not None
+    assert (payment.webhook_delivered_at - webhooks.started_at).total_seconds() >= 0.25
+
+
 async def test_webhook_failure_keeps_status_and_retry_does_not_charge_again(
     session_factory: async_sessionmaker[AsyncSession], clean_db: None
 ) -> None:
